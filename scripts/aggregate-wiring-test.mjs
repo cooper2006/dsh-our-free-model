@@ -441,6 +441,33 @@ let boundPort = 0
   check('an unknown level is refused', badLevel.status, 400)
   await post('/token-saver', { rtk: true, prompts: { caveman: 'lite' } })
 
+  // ── headroom: the switch, the CCR switch, the state line ──────────────────
+  // The proxy itself is an external python service, so this suite never starts
+  // one: what it pins is the settings seam the page writes through and the
+  // state it reads back. A booted host on a machine without headroom reports
+  // `off` (or a start failure in `error`), and the pipeline degrades to RTK —
+  // both are answered by the same GET, so the page never has to guess.
+  check('the headroom switch is on by default', saver.json.headroom.enabled, true)
+  check('and CCR is on by default', saver.json.headroom.ccr, true)
+  check('the state line answers even with no proxy installed', typeof saver.json.headroomState.state, 'string')
+  const headroomOff = await post('/token-saver', { headroom: { enabled: false, ccr: false, pythonPath: '/nonexistent/headroom' } })
+  check('toggling headroom answers', headroomOff.status, 200)
+  check('with the switch off', headroomOff.json.tokenSaver.headroom.enabled, false)
+  check('and CCR off', headroomOff.json.tokenSaver.headroom.ccr, false)
+  check('and the path stored verbatim', headroomOff.json.tokenSaver.headroom.pythonPath, '/nonexistent/headroom')
+  // The state line is environmental — this machine may or may not run a
+  // headroom, and a joined one keeps answering after the switch closes. What
+  // the seam must never do is claim a *start* for a switch that was just
+  // closed, so that is the one transition pinned here.
+  check('closing the switch never reports a start in flight', headroomOff.json.tokenSaver.headroomState.state !== 'starting', true)
+  const headroomBack = await post('/token-saver', { headroom: { enabled: true, ccr: true, pythonPath: '' } })
+  check('turning it back on answers', headroomBack.status, 200)
+  check('with the switch restored', headroomBack.json.tokenSaver.headroom.enabled, true)
+  // The set response is the transition, not the settled truth: with the switch
+  // just closed it must never claim a running proxy, and with it just opened it
+  // must never claim `off` (a start is in flight).
+  checkThat('and the state never claims a running proxy it did not start', headroomBack.json.tokenSaver.headroomState.running === true || headroomBack.json.tokenSaver.headroomState.state !== 'off', JSON.stringify(headroomBack.json.tokenSaver.headroomState))
+
   const optimize = await get('/local-optimize')
   check('the local-answer switches answer', optimize.status, 200)
   check('all five on by default', [optimize.json.quota, optimize.json.prefix, optimize.json.title, optimize.json.suggestion, optimize.json.filepath], [true, true, true, true, true])

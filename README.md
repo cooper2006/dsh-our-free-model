@@ -65,7 +65,7 @@
 - **EAC 渠道（桌面端专属）**——在 DeepSeek Harness 桌面端与 DSHEAC AIO 桌面端中自动解锁一条协付通道，模型以 EAC 前缀显示（如 EAC DeepSeek V4.1 Flash）；凭据加密密封，由宿主指纹闸门把守；该渠道在服务器侧校验 GitHub 授权（登录并 star 本仓库）后才放行对话；在命令行及其它宿主中该通道完全不存在。详见「EAC 渠道」。
 - **Kilo 渠道（免密免费池）**——内置 Kilo AI 公共网关的免费模型池（`isFree` 清单实时拉取，含 `kilo-auto/free` 自动路由），无需任何账号或 Key；模型卡带 Kilo 徽章。思考强度与 EAC 渠道同款：模型自身的档位菜单（Off / Low / Medium / High，默认 High），经网关统一的 `reasoning` 参数真实下发——Off 已逐家族实测将思考归零（nemotron、ling、dots、poolside、apodex、cohere）；stepfun 与 liquid 端点强制思考（对关闭请求返回 400）、两个自动路由不透传关闭，这些模型的菜单不含 Off 档。该池由上游免费提供，上游会在其模型卡中声明 prompt 可能被记录用于改进服务——请勿发送敏感内容，详见「免责声明」。
 - **聚合渠道，自带 Key**——设置页新增一页，把第三方端点接进同一条模型清单：注册表内置 75 家提供商（NVIDIA NIM、OpenRouter、Groq、Cerebras、SambaNova、Gemini、DeepSeek、Mistral、Together、Fireworks、SiliconFlow、Nebius、Chutes、Hugging Face、Cloudflare、Z.ai、Kimi、MiniMax、QwenCloud/Alibaba、Bedrock、Vertex、Vercel AI Gateway、Azure OpenAI，以及无需账号的 Ollama、LM Studio、llama.cpp），写入 Key（本机免账号的提供商不需要）后其模型即以 `provider/model` 出现在选择器里，也可经本地网关调用。Key 只写入本机 0600 的 settings.json，API 只回显 `hasKey` 与 `…abcd` 指纹；每家可单独启停、测试（列表探测，不花一次生成）、发现模型、覆盖 Base URL 与模型清单。OAuth 与 ADC 认证的提供商照常列出，但标注为不可驱动。
-- **省 Token**——三件事：工具输出压缩（RTK）在请求发出前就地重写 `tool_result`（git diff / status / log、grep、find、ls、tree、构建日志、编号转储、搜索清单、重复日志行），实测 40 KB 的 `git diff` 移除 90% 的字节且模型仍能就它作答；提示词瘦身有 caveman 与 ponytail 两族、默认全关；另有五个不占用上游请求的本地应答。设置页用与用量图表同一批统计行显示压缩前后字节、节省比例、压缩块数与统计调用数。
+- **省 Token**——一条降级链：模型级压缩（headroom）优先，工具输出压缩（RTK）兜底。headroom 把整段消息交给本机 headroom 代理，用 SmartCrusher 缩 JSON、Kompress-v2-base 压散文，实测 27 KB 的 JSON 工具结果压到 3.5 KB；开启 CCR 时被压掉的原文缓存在本机，模型可随时用 `headroom_retrieve` 找回。代理不可用、未安装或 wire 不是 OpenAI 时自动落到 RTK——它零依赖地就地重写 `tool_result`（git diff / status / log、grep、find、ls、tree、构建日志、编号转储、搜索清单、重复日志行），实测 40 KB 的 `git diff` 移除 90% 的字节且模型仍能就它作答。另有提示词瘦身（caveman 与 ponytail 两族、默认全关）与五个不占用上游请求的本地应答。设置页用与用量图表同一批统计行显示压缩前后字节、节省比例、压缩块数与统计调用数，两种压缩器只记一个总数。
 - **路由（降级链）**——把任意车道的模型串成一条命名链，以 `combo:<name>` 作为虚拟模型出现在选择器与网关上；`fallback` 固定从链首开始，`round-robin` 轮换起点并连续 N 轮粘滞。链接在输出任何正文之前失败会被整段丢弃，切换对调用方不可见；思考增量不算正文，因此「想了很久才撞上配额墙」正是降级最有价值的场景。
 - **本地网关原生说 Anthropic**——新增 `POST /v1/messages`（流式与非流式，含 thinking / tool_use 块、真实 stop_reason 与流内 error 事件）与 `POST /v1/messages/count_tokens`（本地估算）；`/v1/models` 广播全部车道，含聚合行与链路。网关页新增「接入客户端」分区，按实际绑定的端口与真实要求的密钥生成 Claude Code、Codex、OpenAI SDK、Anthropic SDK、curl 与局域网的可复制配方。
 - **接口具备鉴权围栏**——插件 HTTP 路由优先级高于内核 `/api`，因此内置与内核一致的信任检查（优先复用 composition 的 connection 服务，缺失时退回结构化围栏）。
@@ -318,7 +318,15 @@ Windows 自动检测只支持手动代理，不执行 PAC 自动配置脚本；�
 
 Key 只写入插件自己的 0600 `settings.json`，接口永不回显——页面只显示 `hasKey` 与 `…abcd` 指纹；字段缺省表示保留已存 Key，空字符串表示清除。每家提供商提供：启用/停用、测试、发现模型、Base URL 覆盖（Azure / Cloudflare / Vertex 没有可用默认值，必须覆盖）、模型清单覆盖与移除。测试按钮是**列表探测**：它用提供商的模型列表验证 Key，不花一次生成；提供商声明没有列表接口时，按钮如实说明。OAuth 与 ADC（Google ADC）认证的提供商照常列出并标注「不可驱动」——本车道无法替它们完成交互式登录或云侧凭据流程。OpenCode 的免密免费池**不在此注册表内**：它要求每请求一枚铸造形状的会话 id、v2 客户端 User-Agent 与一组官方工具声明，本车道的通用传输没有地方承载这些，硬列进来只会是一个点不通的选择器行——这 10 个模型本来就由本插件自己的免费车道原生提供（见「免费车道」）。
 
-### 省 Token：工具输出压缩、提示词瘦身与本地应答
+### 省 Token：模型级压缩、工具输出压缩、提示词瘦身与本地应答
+
+**降级链**：模型级压缩（headroom）在前，工具输出压缩（RTK）在后。headroom 吃下某次请求时该请求跳过 RTK——对一份已经整体压过的正文再跑一遍模式匹配只会白烧字节；headroom 不可用时 RTK 自己上，两者的字节统计落在同一个总数里。
+
+**模型级压缩（headroom）** 把整段消息列表交给本机的 headroom 代理（外部 Python 服务，pip 包 `headroom-ai[proxy]`），它用 SmartCrusher 做 JSON 智能缩减、用 Kompress-v2-base 压散文。实测：27 KB 的 JSON 工具结果压到 3.5 KB。安全规则：只对 OpenAI chat 线生效（Anthropic 与 Responses 线需要 headroom 不提供的格式往返，硬转只会猜错块形状）；压缩后的整包字节若不严格小于原文就保留原文；代理报错、超时或没装一律失败开放，请求绝不因为「本来是为了让它更便宜」的环节而失败。
+
+代理是**受管子进程**，与 mihomo 之于 egress 同一形状：插件自己找 `headroom`（显式路径 → PATH → `python3 -m headroom.proxy`，从不替你下载任何东西），起在 `127.0.0.1:8787`，就绪最长等 45 秒；端口上已有进程应答就直接接入、不抢占；受管进程中途退出按 15 秒→600 秒指数退避重启，稳定运行两分钟即重置退避阶梯。启动是**不阻塞**的：转发端口先绑好，代理就绪前由 RTK 压缩。
+
+**CCR（压缩可回查）** 让压缩可逆：被压掉的原文缓存在本机，压缩块里留下 `<<ccr:<hash>…>>` 标记，请求随附声明 `headroom_retrieve` 工具。模型调用它时，宿主并不认识这个工具（会回一个 unknown tool 的桩），插件在下一轮请求里把该桩换成代理缓存的原文——模型问一次、宿主摊手、插件作答，正是 CCR 承诺的那一次往返。只有压缩结果真的带标记时才声明这个工具：一个永远 404 的工具比没有工具更糟。
 
 **工具输出压缩（RTK）** 在请求发出之前就地重写 `tool_result` / `role:"tool"` 内容：git diff、git status、git log、grep、find、ls、tree、构建与包管理器日志、带行号的文件转储、Cursor 搜索清单，以及成串重复的日志行。实测：40 KB 的 `git diff` 移除 90% 的字节，模型仍就这份 diff 作出了回答。安全规则：报错的工具结果永不触碰，小于尺寸下限的内容不碰，替换结果永不大于原文，过滤器抛错时原样放行，且整条管线幂等。该压缩对全部车道生效（含本地网关），默认开启。
 
@@ -358,7 +366,10 @@ src/providers/registry.json 聚合车道注册表：75 家提供商的分类、�
 src/providers/index.js 注册表读取与 provider/model 复合 id 解析
 src/aggregate.js 聚合车道：清单行、凭据解析、Key 脱敏、列表探测、按线协议发送
 src/anthropic.js /v1/messages 的 Anthropic Messages 编解码与本地 token 估算
-src/token-saver/index.js 压缩管线：提示词注入 -> 工具输出压缩，按字节留痕、失败开放
+src/token-saver/index.js 压缩管线：原文回查 -> 提示词注入 -> headroom -> RTK 兜底，
+ 按字节留痕、失败开放
+src/headroom/index.js 托管 headroom 代理：二进制定位、端口接入、就绪等待、退避重启
+src/headroom/compress.js headroom 压缩步骤与 CCR 回查：整包字节比较、marker 解析
 src/token-saver/inject.js chat / messages / responses 三线的幂等注入与撤销
 src/token-saver/prompts.js caveman / ponytail 两族提示词与档位
 src/token-saver/rtk/ 工具输出过滤器：git diff/status/log、grep、find、ls、tree、
@@ -388,11 +399,13 @@ client.js 浏览器半身：手写 ModuleLoader bundle，无构建步骤
 **使用自有 JSON 存储，不接入 settings seam。** settings 注册 API 在两版内核间不一致；
 私有 JSON 存储行为一致，且转发 Key 存放于 0600 权限文件中，不进入任何共享设置文档。
 
-**Token 压缩跑在唯一收口上，且失败开放。** 提示词注入与工具输出压缩在 payload 完成全部
-改写之后执行——指纹改名、档位补丁、密封车道的节奏提示都已落定——收口在 `payloadFor()`：
-适配器自己的派发与本地网关（它同样经适配器发起）都从这唯一一处经过，因此每条车道、每一段
-恢复请求都同样压缩。每一步都失败开放：压缩器抛错就跳过，过滤器抛错就原样放行，形态不认识
-就不动——一个请求绝不能因为一个「本来是为了让它更便宜」的环节而失败。
+**Token 压缩跑在唯一收口上，且失败开放。** CCR 原文回查、提示词注入、headroom 与工具输出
+压缩在 payload 完成全部改写之后执行——指纹改名、档位补丁、密封车道的节奏提示都已落定——
+收口在 `payloadFor()`：适配器自己的派发与本地网关（它同样经适配器发起）都从这唯一一处经过，
+因此每条车道、每一段恢复请求都同样压缩。收口是异步的（headroom 是一次 HTTP 往返），
+但语义不变：它在同一处、对同一份 payload、按同一顺序执行。每一步都失败开放：压缩器
+抛错就跳过，过滤器抛错就原样放行，形态不认识就不动，代理没装或超时就退回 RTK——一个请求
+绝不能因为一个「本来是为了让它更便宜」的环节而失败。
 
 **combo 是一条虚拟清单行，降级在适配器里解析。** 链路以 `channel:'combo'` 加一串真实模型
 id 并入合并后的清单，因此选择器照常广播它、本地网关照常按名调用它；链的展开与推进判定发生

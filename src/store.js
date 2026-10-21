@@ -193,6 +193,15 @@ export const SETTINGS_INITIAL = {
     enabled: true,
     rtk: true,
     prompts: { caveman: 'off', ponytail: 'off' },
+    /** Headroom proxy: the managed Python service that compresses whole payloads
+     *  (SmartCrusher for JSON, Kompress-v2-base for text) and caches originals
+     *  for CCR retrieval. On by default; falls back to RTK alone when the binary
+     *  is missing or the port will not open. */
+    headroom: {
+      enabled: true,
+      ccr: true,
+      pythonPath: '',
+    },
   },
   /** The aggregate lane: third-party providers reached with the user's own key.
    *  Keys live in this 0600 file, never in a shared settings document, and the

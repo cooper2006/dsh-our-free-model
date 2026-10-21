@@ -37,6 +37,7 @@ import { generateKey, rankLanAddresses, startForwardServer, startLanRelay } from
 import { chanGatewayCredential, chanGatewayEnabled, chanGatewayPort, startChanRelay } from './src/chan-relay.js'
 import { CODE, UpstreamError } from './src/http.js'
 import { egressActive, egressFetch, outletLabel, readOutletSelection, startEgressRelay } from './src/egress.js'
+import { startHeadroom, headroomStatus } from './src/headroom/index.js'
 import { directFetch } from './src/eac.js'
 import { clearEacUser, readEacUser, writeEacUser } from './src/eac-user.js'
 import { createEacLoginPoller } from './src/eac-login.js'
@@ -911,6 +912,102 @@ export function apply(ctx, config) {
     outletRestartTimer.unref?.()
   }
 
+  // ── headroom proxy: a managed subprocess, the way mihomo is for egress ─────
+  // The token saver's strongest link. A fingerprint over its two settings keys
+  // decides "restart or leave it"; a dead managed process restarts on a
+  // schedule the same as the outlet, because a proxy that dies mid-run would
+  // otherwise sit on its port refusing every call until somebody touched the
+  // settings page again.
+  let headroomSyncInFlight = null
+  let headroomHandle = null
+  let headroomFingerprint = ''
+  let headroomError = ''
+  // A machine without the proxy installed would otherwise re-run the full
+  // binary hunt — PATH scan, import probes — on every settings POST, for a
+  // result that cannot change until something changes. One failed attempt is
+  // retried after a minute at most, and at once when the fingerprint moves.
+  const HEADROOM_RETRY_MS = 60_000
+  let headroomAttempt = { fingerprint: '', at: 0, failed: false }
+  async function syncHeadroom() {
+    while (headroomSyncInFlight !== null) await headroomSyncInFlight.catch(() => {})
+    const run = syncHeadroomOnce()
+    headroomSyncInFlight = run
+    try { await run } finally { if (headroomSyncInFlight === run) headroomSyncInFlight = null }
+  }
+  async function syncHeadroomOnce() {
+    const desired = settings.get().tokenSaver?.headroom ?? {}
+    // `!== false`, not `=== true`: the headroom default is ON, and a settings
+    // file written before the section existed has no `headroom` key at all —
+    // `undefined === true` would then keep the proxy down forever on a
+    // machine that has it installed. `saverConfig` reads the same default;
+    // the reconciler must agree with the pipeline about what "unset" means.
+    const wanted = desired.enabled !== false
+    const fingerprint = `${String(desired.ccr ?? true).toLowerCase()}\n${String(desired.pythonPath ?? '').trim()}`
+    if (headroomHandle !== null && wanted && headroomFingerprint === fingerprint && !headroomHandle.dead) return
+    if (headroomHandle === null && !wanted) return
+    if (headroomHandle !== null) {
+      const closing = headroomHandle
+      headroomHandle = null
+      headroomFingerprint = ''
+      await closing.close().catch(() => {})
+    }
+    if (!wanted) {
+      headroomError = ''
+      headroomAttempt = { fingerprint: '', at: 0, failed: false }
+      return
+    }
+    if (headroomAttempt.failed && headroomAttempt.fingerprint === fingerprint
+      && Date.now() - headroomAttempt.at < HEADROOM_RETRY_MS) return
+    try {
+      headroomHandle = await startHeadroom({
+        settings: () => settings.get(),
+        dataDir,
+        log: message => logger.info?.(`our-free-model headroom: ${message}`),
+        pythonPath: String(desired.pythonPath ?? '').trim(),
+        onDead: scheduleHeadroomRestart,
+      })
+      headroomFingerprint = fingerprint
+      headroomError = ''
+      headroomAttempt = { fingerprint: '', at: 0, failed: false }
+      headroomUpSince = Date.now()
+      logger.info?.('our-free-model: headroom proxy up')
+      // Teardown may have run while this start was awaiting its port: the
+      // disposer read `headroomHandle` while it was still null, so it closed
+      // nothing and the process would survive its own generation as an orphan
+      // holding 8787. Reap it here instead.
+      if (disposed) {
+        const orphan = headroomHandle
+        headroomHandle = null
+        void orphan.close().catch(() => {})
+      }
+    } catch (error) {
+      headroomError = String(error?.message ?? error)
+      headroomAttempt = { fingerprint, at: Date.now(), failed: true }
+      logger.warn?.(`our-free-model: headroom proxy could not start (${headroomError})`)
+    }
+  }
+
+  // A managed headroom that dies mid-run: the port still answers a TCP connect
+  // (the process holds it) but every /v1/compress 502s, so a restart on the
+  // outlet's schedule is the same shape of fix — backoff, a stable two-minute
+  // run resets the ladder.
+  const HEADROOM_STABLE_MS = 120_000
+  let headroomUpSince = 0
+  let headroomRestartAttempts = 0
+  let headroomRestartTimer = null
+  function scheduleHeadroomRestart() {
+    if (headroomRestartTimer !== null) return
+    if (Date.now() - headroomUpSince >= HEADROOM_STABLE_MS) headroomRestartAttempts = 0
+    const delay = Math.min(15_000 * 2 ** headroomRestartAttempts, 600_000)
+    headroomRestartAttempts += 1
+    logger.warn?.(`our-free-model: headroom went down; restarting in ${Math.round(delay / 1000)}s (attempt ${headroomRestartAttempts})`)
+    headroomRestartTimer = setTimeout(() => {
+      headroomRestartTimer = null
+      void syncHeadroom().catch(() => {})
+    }, delay)
+    headroomRestartTimer.unref?.()
+  }
+
   // ── hot reload + in-app upgrade ─────────────────────────────────────────────
   /**
    * Swap the running plugin for the code on disk. Called for explicit reloads
@@ -1044,7 +1141,7 @@ export function apply(ctx, config) {
   }
   const api = createApiRoutes({
     settings, stats, availability, catalog: () => modelRuntime.catalog, state,
-    refreshCatalog, refreshAvailability, syncForward, syncRelay, syncEgress,
+    refreshCatalog, refreshAvailability, syncForward, syncRelay, syncEgress, syncHeadroom,
     onVisibilityChanged: emitTopology,
     pool: fetchPoolSnapshot,
     eacAuth,
@@ -1161,7 +1258,7 @@ export function apply(ctx, config) {
     },
     // ── token savers ────────────────────────────────────────────────────────
     tokenSaver: {
-      get: () => ({ ...publicTokenSaver(settings.get().tokenSaver), savings: buildStats(stats.get(), state().catalog).savings }),
+      get: () => ({ ...publicTokenSaver(settings.get().tokenSaver), savings: buildStats(stats.get(), state().catalog).savings, headroomState: publicHeadroom(headroomError) }),
       set: async patch => {
         if (patch === null || typeof patch !== 'object') throw httpError(400, 'the request body must be a JSON object')
         const current = settings.get().tokenSaver ?? {}
@@ -1178,14 +1275,32 @@ export function apply(ctx, config) {
             prompts.ponytail = level
           }
         }
+        const headroom = { ...(current.headroom ?? {}) }
+        if (patch.headroom !== null && typeof patch.headroom === 'object') {
+          if (patch.headroom.enabled !== undefined) headroom.enabled = patch.headroom.enabled === true
+          if (patch.headroom.ccr !== undefined) headroom.ccr = patch.headroom.ccr === true
+          if (patch.headroom.pythonPath !== undefined) headroom.pythonPath = String(patch.headroom.pythonPath)
+        }
         settings.update({ tokenSaver: {
           ...current,
           prompts,
           ...patch.enabled === undefined ? {} : { enabled: patch.enabled === true },
           ...patch.rtk === undefined ? {} : { rtk: patch.rtk === true },
+          headroom,
         } })
         settings.flush()
-        return publicTokenSaver(settings.get().tokenSaver)
+        // Same out-of-the-way rule as the settings POST: a managed python start
+        // is seconds long (worst case 45), and the switch you just moved is
+        // already stored. The state this answer carries is adjusted for the
+        // reconciliation in flight, so the page shows the transition, not the
+        // stale byte it left behind; the next GET reports the settled truth.
+        void syncHeadroom().catch(() => {})
+        // `headroomState`, not `state`: `state` is this plugin's catalog accessor
+        // at module scope, and the sibling `get` above still calls it.
+        const headroomState = publicHeadroom(headroomError)
+        if (headroom.enabled !== false && headroomState.state === 'off') headroomState.state = 'starting'
+        if (headroom.enabled === false && headroomState.running) headroomState.state = 'stopping'
+        return { ...publicTokenSaver(settings.get().tokenSaver), headroomState }
       },
     },
     // ── the five local answers ──────────────────────────────────────────────
@@ -1404,6 +1519,16 @@ export function apply(ctx, config) {
     // The geography-reprobe timer belongs to this generation; without this it
     // outlives teardown and fires a forced probe round after the stores it
     // reads have been disposed (the rejection gets swallowed, quota burned).
+    if (headroomRestartTimer !== null) clearTimeout(headroomRestartTimer)
+    // Close this generation's own handle, never the module-level one: during a
+    // hot reload the next generation may already have joined a process, and
+    // `stopHeadroom()` would take that one down instead of ours. A joined
+    // handle closes nothing — its process belongs to whoever started it.
+    if (headroomHandle !== null) {
+      const closing = headroomHandle
+      headroomHandle = null
+      void closing.close().catch(() => {})
+    }
     modelRuntime.dispose()
     push.dispose()
     watcher?.()
@@ -1416,6 +1541,14 @@ export function apply(ctx, config) {
       // First: the catalog refresh and its probe round below go through
       // egressFetch, so the outlet must be carrying traffic before they run.
       await syncEgress()
+      if (disposed) return
+      // The headroom proxy, fired not awaited: nothing downstream depends on
+      // it — the pipeline degrades to RTK on every request until its port
+      // answers — while the listeners behind it must bind as fast as possible.
+      // A boot that waited on a managed python start (~5s, 45s worst case)
+      // held the forward port down for the whole window, exactly the bug the
+      // egress comment above was written to prevent.
+      void syncHeadroom().catch(() => {})
       if (disposed) return
       // The listeners next, ahead of the round that goes out: they answer local
       // sockets and nothing in them depends on the gateway. Binding them after
@@ -1897,6 +2030,12 @@ export function createApiRoutes(deps) {
         await deps.syncForward()
         await deps.syncRelay()
         await deps.syncEgress()
+        // The proxy is reconciled out of the response's way: a managed python
+        // start takes seconds and the pipeline degrades to RTK until it lands,
+        // so "saved" should mean "your settings are stored", not "and here is
+        // a spinner while a compressor boots". `syncHeadroom` serialises with
+        // itself, so this POST's fingerprint is still the one that takes.
+        void deps.syncHeadroom?.().catch(() => {})
         return send(200, { ok: true, settings: publicSettings(deps.settings.get(), deps.forwardInfo(), deps.egressInfo()) })
       }
       if (method === 'POST' && routePath === '/refresh') {
@@ -2022,6 +2161,36 @@ function publicTokenSaver(section) {
     prompts: { caveman: config.caveman, ponytail: config.ponytail },
     cavemanLevels: CAVEMAN_LEVELS,
     ponytailLevels: PONYTAIL_LEVELS,
+    headroom: {
+      enabled: config.headroom?.enabled ?? true,
+      ccr: config.headroom?.ccr ?? true,
+      pythonPath: config.headroom?.pythonPath ?? '',
+    },
+  }
+}
+
+/**
+ * The headroom proxy's state as the settings page reads it: the last start
+ * failure plus whatever `headroomStatus()` reports on the module-level handle.
+ * The page re-renders on every settings write, and a probe that had to await a
+ * TCP dial would paint a spinner behind every control — so this is the cached
+ * view, refreshed by `syncHeadroom` on boot and on every settings POST.
+ *
+ * `error` is passed in, not read from the closure: `publicHeadroom` lives at
+ * module scope like `publicSettings`, and the last failure string belongs to
+ * the running generation, which is where `syncHeadroom` catches it.
+ *
+ * @param {string} error - the last headroom start failure, '' when healthy
+ */
+function publicHeadroom(error) {
+  const status = headroomStatus()
+  return {
+    state: status.state,
+    detail: status.detail ?? '',
+    port: status.port ?? null,
+    pid: status.pid ?? null,
+    running: status.running === true,
+    error,
   }
 }
 

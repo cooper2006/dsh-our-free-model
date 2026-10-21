@@ -75,6 +75,7 @@ const suites = [
   ['standalone-login-terminal', 'standalone-login-terminal-test.mjs', []],
   ['standalone-package', 'standalone-package-test.mjs', ['--sources-only']],
   ['egress', 'egress-test.mjs', []],
+  ['headroom', 'headroom-test.mjs', []],
   ['effort', 'effort-test.mjs', []],
   ['projection', 'projection-test.mjs', []],
   ['fingerprint', 'fingerprint-test.mjs', []],

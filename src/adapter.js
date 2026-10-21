@@ -29,7 +29,7 @@ import { createChannel } from './channel.js'
 import { recoveryPolicy, canRecover, canRecoverSilentStop, recoveryMessages, continuationMessages, checkpointFits, addUsage, createBlockTracker } from './recovery.js'
 import { isEacEntry, isKiloEntry } from './catalog.js'
 import { isComboEntry, comboChain } from './combos.js'
-import { applyTokenSavers, saverConfig } from './token-saver/index.js'
+import { applyTokenSaversAsync, saverConfig } from './token-saver/index.js'
 import { classifyFailure, describeVerdict, shouldAdvance } from './route/classify.js'
 import { FALLBACK_IMAGE_PRICING } from './image-pricing.js'
 
@@ -392,7 +392,7 @@ export class FreeModelAdapter {
     // 一次逻辑回合的丢弃内容告警只由首个 payload 收集。检查点估算和续写段都要另建
     // 一份 payload，共用同一个数组会让 `image-dropped` 按 build 次数重复累积，还会
     // 让已经交出去的首段样本跟着后面的 build 一起变长。
-    const payloadFor = (input, ceiling, sink, savingsSink) => {
+    const payloadFor = async (input, ceiling, sink, savingsSink) => {
       const payload = buildPayload(wire, entry.id, input, options, ceiling, resolveImage, sink)
       if (declared.length > 0) payload.tools = declared
       if (typeof options.temperature === 'number' && Number.isFinite(options.temperature)) payload.temperature = options.temperature
@@ -416,7 +416,9 @@ export class FreeModelAdapter {
       // they report and the fingerprint's rename map both describe the body that
       // actually ships. Applied on estimation builds too — the checkpoint size
       // gate has to measure the payload it is gating, not a fatter draft of it.
-      const savings = applyTokenSavers(payload, wire, saverConfig(settings))
+      // The async pipeline: headroom first (a live proxy, its OpenAI wire), RTK
+      // as the degradation chain when headroom cannot take the payload.
+      const savings = await applyTokenSaversAsync(payload, wire, saverConfig(settings))
       if (savingsSink !== undefined) savingsSink.report = savings
       return payload
     }
@@ -431,7 +433,7 @@ export class FreeModelAdapter {
       const attemptStarted = Date.now()
       const recovering = attempt === 1
       const savingsSink = {}
-      const payload = payloadFor(attemptMessages, attemptBudget, recovering ? [] : warnings, savingsSink)
+      const payload = await payloadFor(attemptMessages, attemptBudget, recovering ? [] : warnings, savingsSink)
       attemptSavings = savingsSink.report ?? null
       // The absorbed channels have no tool-name gate; their models see the
       // caller's tools exactly as declared, so the fingerprint pass is free-lane
@@ -587,7 +589,7 @@ export class FreeModelAdapter {
             ? continuationMessages(messages, outcome.answerText)
             : recoveryMessages(messages, outcome.reasoningText)
           if (continuationBudget >= MIN_BUDGET
-            && checkpointFits(payloadFor(nextMessages, continuationBudget, []), entry, maxTokensCut ? outcome.answerText : outcome.reasoningText, continuationBudget)) {
+            && checkpointFits(await payloadFor(nextMessages, continuationBudget, []), entry, maxTokensCut ? outcome.answerText : outcome.reasoningText, continuationBudget)) {
             record(false, outcome, { truncated: true, recoveryScheduled: true })
             this.deps.warn?.(maxTokensCut
               ? 'our-free-model: the answer hit the output token ceiling; continuing once from where it stopped'
@@ -817,7 +819,7 @@ function savingsFields(report) {
       // shows "before → after", and an after of 0 beside a before of 2599 reads
       // as "the body became empty" rather than "this field was never recorded".
       bytesAfter: Number(report.bytesAfter) || 0,
-      blocks: Array.isArray(report.rtk?.hits) ? report.rtk.hits.length : 0,
+      blocks: Array.isArray(report.rtk?.hits) ? report.rtk.hits.length : (Number(report.headroom?.blocks) || 0),
       ...promptInjected ? { prompt: report.prompt.families ?? [] } : {},
     },
   }

@@ -680,6 +680,20 @@ window.__ModuleLoader__.load({
         'saver.level.wenyanLite': '文言·轻',
         'saver.level.wenyan': '文言',
         'saver.level.wenyanUltra': '文言·极',
+        'saver.headroom': 'Headroom 模型级压缩',
+        'saver.headroomWhat': '把整段消息交给本地 headroom 代理做模型级压缩（JSON 智能缩减 + 文本压缩器），是比 RTK 更强的一层；代理不可用或 wire 不是 OpenAI 时，由 RTK 兜底。',
+        'saver.headroomCcr': 'CCR：压缩可回查',
+        'saver.headroomCcrWhat': '被压缩段落的原文缓存在本机，并随请求声明 headroom_retrieve 工具，模型随时可以找回原文。关掉后压缩就是单向的。',
+        'saver.headroomPython': 'headroom 可执行文件 / python 路径',
+        'saver.headroomPythonHint': '可选。留空时插件先找 PATH 上的 `headroom`，再试 `python3 -m headroom.proxy`；插件不会替你下载任何东西。',
+        'saver.headroomStatus.ready': 'headroom 代理运行中',
+        'saver.headroomStatus.alreadyRunning': '已接入本机正在监听的 headroom 代理',
+        'saver.headroomStatus.off': 'headroom 代理未运行——压缩由 RTK 承担',
+        'saver.headroomStatus.dead': '受管的 headroom 进程已退出，重启已排期',
+        'saver.headroomStatus.starting': 'headroom 代理启动中——就绪前由 RTK 压缩',
+        'saver.headroomStatus.stopping': '正在关闭 headroom 代理',
+        'saver.chainTitle': '降级链',
+        'saver.chainSub': 'headroom 优先，RTK 兜底：代理吃下某次请求时该请求跳过 RTK；代理不行时 RTK 自己压缩工具输出。统计口径始终是一个总数。',
         'routing.title': '路由',
         'routing.sub': '把若干模型串成一条降级链：链上第一个失败就换下一个，对调用方始终只有一个模型 ID。',
         'routing.chains': '已存链路',
@@ -1357,6 +1371,20 @@ window.__ModuleLoader__.load({
         'saver.dashHint': 'Bytes actually compacted on this machine, written locally only.',
         'saver.bytesBefore': 'Before',
         'saver.bytesAfter': 'After',
+        'saver.headroom': 'Headroom model-level compression',
+        'saver.headroomWhat': 'Hands the whole message list to a local headroom proxy — SmartCrusher for JSON, Kompress-v2-base for prose — the stronger of the two body compressors. When the proxy is down or the wire is not OpenAI, RTK carries the load instead.',
+        'saver.headroomCcr': 'CCR: keep the originals retrievable',
+        'saver.headroomCcrWhat': 'Compressed blocks stay cached on this machine and the request declares a `headroom_retrieve` tool, so the model can ask for the original of anything the compacted form dropped. Off means compression is one-way.',
+        'saver.headroomPython': 'headroom binary / python path',
+        'saver.headroomPythonHint': 'Optional. With nothing here the plugin looks for `headroom` on PATH, then `python3 -m headroom.proxy`. It never downloads anything.',
+        'saver.headroomStatus.ready': 'headroom proxy running',
+        'saver.headroomStatus.alreadyRunning': 'joined the headroom proxy already listening',
+        'saver.headroomStatus.off': 'headroom proxy not running — RTK carries the compression',
+        'saver.headroomStatus.dead': 'the managed headroom process exited; a restart is scheduled',
+        'saver.headroomStatus.starting': 'headroom proxy starting — RTK compresses until it is ready',
+        'saver.headroomStatus.stopping': 'closing the headroom proxy',
+        'saver.chainTitle': 'Degradation chain',
+        'saver.chainSub': 'headroom first, RTK as its fallback: when the proxy takes a payload, RTK is skipped for that request; when it cannot, RTK compacts the tool outputs on its own. One byte total either way.',
         'saver.bytesSaved': 'Bytes saved',
         'saver.percent': 'Saved',
         'saver.blocks': 'Blocks compacted',
@@ -5816,6 +5844,49 @@ window.__ModuleLoader__.load({
                     onChange: () => { if (busy === '') saveSaver({ rtk: saver.rtk !== true }) },
                   })),
                 h('p', { className: 'ofm_note' }, t('saver.rtkSafety')))),
+            h(Section, { title: t('saver.headroom'), hint: t('saver.headroomWhat') },
+              h('div', { className: 'ofm_panel ofm_rise' },
+                h('div', { className: 'ofm_row' },
+                  h(Switch, {
+                    checked: saver.headroom?.enabled === true, label: t('saver.headroom'), disabled: busy !== '',
+                    onChange: () => { if (busy === '') saveSaver({ headroom: { enabled: saver.headroom?.enabled !== true } }) },
+                  })),
+                // The proxy's own state, from the host's cached view: a joined
+                // process, a ready managed one, or the last start failure. The
+                // pipeline degrades to RTK in every non-running row, so none of
+                // them is an error — the note says who carries the compression.
+                h('p', { className: 'ofm_note' }, (() => {
+                  const state = saver.headroomState ?? {}
+                  if (state.state === 'ready') return t('saver.headroomStatus.ready')
+                  if (state.state === 'already-running') return t('saver.headroomStatus.alreadyRunning')
+                  if (state.state === 'dead') return t('saver.headroomStatus.dead')
+                  if (state.state === 'starting') return t('saver.headroomStatus.starting')
+                  if (state.state === 'stopping') return t('saver.headroomStatus.stopping')
+                  if (state.error !== undefined && state.error !== '') return `headroom: ${state.error}`
+                  return t('saver.headroomStatus.off')
+                })()),
+                h('div', { className: 'ofm_row' },
+                  h(Switch, {
+                    checked: saver.headroom?.ccr === true, label: t('saver.headroomCcr'), disabled: busy !== '',
+                    onChange: () => { if (busy === '') saveSaver({ headroom: { ccr: saver.headroom?.ccr !== true } }) },
+                  })),
+                h('p', { className: 'ofm_note' }, t('saver.headroomCcrWhat')),
+                h('div', { className: 'ofm_field' },
+                  h('span', null, t('saver.headroomPython')),
+                  h('input', {
+                    className: 'ofm_input', type: 'text', placeholder: 'auto',
+                    defaultValue: saver.headroom?.pythonPath ?? '',
+                    disabled: busy !== '',
+                    // Blur-commit, like the relay port above: a path is typed
+                    // character by character and every keystroke posting would
+                    // re-run syncHeadroom mid-word.
+                    onBlur: event => {
+                      const next = event.target.value.trim()
+                      if (busy === '' && next !== String(saver.headroom?.pythonPath ?? '')) saveSaver({ headroom: { pythonPath: next } })
+                    },
+                  }),
+                  h('span', null, t('saver.headroomPythonHint'))),
+                h('p', { className: 'ofm_note' }, `${t('saver.chainTitle')} — ${t('saver.chainSub')}`))),
             h(Section, { title: t('saver.localTitle'), hint: t('saver.localHint') },
               h('div', { className: 'ofm_panel ofm_rise' },
                 h('div', { className: 'ofm_row' },
