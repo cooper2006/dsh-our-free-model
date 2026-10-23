@@ -75,7 +75,7 @@ const suites = [
   ['standalone-login-terminal', 'standalone-login-terminal-test.mjs', []],
   ['standalone-package', 'standalone-package-test.mjs', ['--sources-only']],
   ['egress', 'egress-test.mjs', []],
-  ['headroom', 'headroom-test.mjs', []],
+  ['egress-availability', 'egress-availability-test.mjs', []],
   ['effort', 'effort-test.mjs', []],
   ['projection', 'projection-test.mjs', []],
   ['fingerprint', 'fingerprint-test.mjs', []],
@@ -119,7 +119,6 @@ const suites = [
   ['model-test-finish-integration', 'model-test-finish-integration-test.mjs', []],
   ['bench-integration', 'bench-integration-test.mjs', []],
   ['plugin-bench-ui', 'plugin-bench-ui-test.mjs', []],
-  ['codearts-direct-fetch', 'codearts-direct-fetch-test.mjs', []],
   ['gateway-source', 'gateway-source-test.mjs', []],
 ].filter(([name]) => (mode === 'contributor' ? !['manifest', 'release'].includes(name)
   : mode === 'release' ? releaseSuites.has(name) : true)
