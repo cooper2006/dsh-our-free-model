@@ -3,6 +3,25 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { registerHooks, stripTypeScriptTypes } from 'node:module'
 import { fileURLToPath } from 'node:url'
+
+// Node.js 26+ removed 'transform' mode from stripTypeScriptTypes.
+// The channel-pack source uses TS parameter properties (readonly in constructor)
+// which require transformation, not just stripping.
+// CI uses Node 22 where 'transform' mode is available.
+const nodeMajor = parseInt(process.versions.node.split('.')[0], 10)
+let transformSupported = false
+try {
+  stripTypeScriptTypes('const x: number = 1', { mode: 'transform' })
+  transformSupported = true
+} catch {
+  transformSupported = false
+}
+
+if (!transformSupported) {
+  console.log('SKIP gateway-source: Node.js', process.versions.node, 'does not support stripTypeScriptTypes({ mode: "transform" })')
+  console.log('This test requires Node.js 22 (CI version). Skipping.')
+  process.exit(0)
+}
 const sourceRoot = new URL('../vendor/channel-pack/src/', import.meta.url).href
 const kernel = new URL('./lib/channel-pack-kernel.mjs', import.meta.url).href
 const hooks = registerHooks({
